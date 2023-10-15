@@ -1,75 +1,98 @@
-//import modules: express, dotenv
 const express = require("express");
 const dotenv = require("dotenv");
 const app = express();
+const { EventEmitter } = require("events");
 
-//accept json data in requests
-app.use(express.json());
+app.use(express.json()); //accept json data in requests
 
-//setup environment variables
+//environment variables
 dotenv.config();
 
 //OpenAIApi Configuration
 const { Configuration, OpenAIApi } = require("openai");
-
 const configuration = new Configuration({
   apiKey: process.env.OPENAI_API_KEY,
 });
-//build openai instance using OpenAIApi
 const openai = new OpenAIApi(configuration);
 
-//build the runCompletion which sends a request to the OPENAI Completion API
+//Create an EventEmitter for sending stream data
+const completionEmitter = new EventEmitter();
+
 //runCompletion
-async function runCompletion(prompt) {
-  const response = await openai.createCompletion({
-    model: "text-davinci-003",
-    prompt: prompt,
-    temperature: 1,
-    max_tokens: 50,
-    top_p: 1,
-    // n: 3,
-    // echo: true,
-    frequency_penalty: 0,
-    presence_penalty: 0,
+async function startCompletionStream(prompt) {
+  const response = await openai.createCompletion(
+    {
+      model: "text-davinci-003",
+      prompt: prompt,
+      temperature: 1,
+      max_tokens: 50,
+      top_p: 1,
+      frequency_penalty: 0,
+      presence_penalty: 0,
+      stream: true,
+    },
+    {
+      responseType: "stream",
+    }
+  );
+
+  response.data.on("data", (data) => {
+    console.log(
+      data
+        .toString()
+        .replace(/^data: /, "")
+        .trim()
+    );
+    const message = data
+      .toString()
+      .replace(/^data: /, "")
+      .trim();
+
+    if (message !== "[DONE]") {
+      //Emit data to SSE connection
+      completionEmitter.emit("data", message);
+    } else {
+      completionEmitter.emit("done"); //Notify stream completion
+    }
   });
-  return response;
 }
 
-//post request to /api/chatgpt
+startCompletionStream("Cars are amazing because");
+
 app.post("/api/chatgpt", async (req, res) => {
   try {
-    //extract the text from the request body
     const { text } = req.body;
 
-    // Pass the request text to the runCompletion function
-    const completion = await runCompletion(text);
+    // Start the completion stream
+    startCompletionStream(text);
 
-    // Return the completion as a JSON response
-    res.json({ data: completion.data });
+    //listen to events
+    const dataListener = (data) => {
+      res.write(data);
+    };
+    const doneListener = () => {
+      res.write('{"event":"done"}');
+      res.end();
+      //delete listeners
+      completionEmitter.off("data", dataListener);
+      completionEmitter.off("done", doneListener);
+    };
+    completionEmitter.on("data", dataListener);
+    completionEmitter.on("done", doneListener);
   } catch (error) {
-    //handle the error in the catch statement
     if (error.response) {
       console.error(error.response.status, error.response.data);
       res.status(error.response.status).json(error.response.data);
     } else {
-      console.error("Error with OPENAI API request:", error.message);
+      console.error(`Error with OpenAI API request: ${error.message}`);
       res.status(500).json({
         error: {
-          message: "An error occured during your request.",
+          message: "An error occurred during your request.",
         },
       });
     }
   }
 });
 
-//set the PORT
 const PORT = process.env.PORT || 5000;
-
-//start the server on the chosen PORT
 app.listen(PORT, console.log(`Server started on port ${PORT}`));
-
-const { encode, decode } = require("gpt-3-encoder");
-
-const x = encode("This is some text");
-const cost_per_token = 1.5 / 1000000;
-console.log(4000 * cost_per_token);
